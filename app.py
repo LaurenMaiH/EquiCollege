@@ -5,7 +5,7 @@ import numpy as np
 from sklearn.preprocessing import MinMaxScaler
 import altair as alt
 
-st.set_page_config(page_title="Affordability Reality Engine",
+st.set_page_config(page_title="EquiCollege",
                    page_icon="🏫", layout="wide")
 
 #data loading (cached)
@@ -98,12 +98,34 @@ def filter_by_size(size_choice):
 
 def merge_and_normalize(ids):
     if not ids:
-        return pd.DataFrame()
-    filtered_college = college_selected_raw[college_selected_raw["UNIQUE_IDENTIFICATION_NUMBER_OF_THE_INSTITUTION"].isin(ids)]
-    filtered_afford = affordability_df[affordability_df["Unit ID"].isin(ids)][["Unit ID","Institution Name","MSI Status","Average Work Study Award","Affordability Gap (net price minus income earned working 10 hrs at min wage)","State Abbreviation"]]
-    merged = filtered_college.merge(filtered_afford, left_on="UNIQUE_IDENTIFICATION_NUMBER_OF_THE_INSTITUTION", right_on="Unit ID", how="inner")
-    if merged.empty:
-        return merged
+        return pd.DataFrame(), pd.DataFrame()
+
+    # Raw merged (for display)
+    raw_college = college_selected_raw[
+        college_selected_raw["UNIQUE_IDENTIFICATION_NUMBER_OF_THE_INSTITUTION"].isin(ids)
+    ]
+    raw_afford = affordability_df[
+        affordability_df["Unit ID"].isin(ids)
+    ][[
+        "Unit ID", "Institution Name", "MSI Status",
+        "Average Work Study Award",
+        "Affordability Gap (net price minus income earned working 10 hrs at min wage)",
+        "State Abbreviation"
+    ]]
+
+    raw_merged = raw_college.merge(
+        raw_afford,
+        left_on="UNIQUE_IDENTIFICATION_NUMBER_OF_THE_INSTITUTION",
+        right_on="Unit ID",
+        how="inner"
+    )
+
+    if raw_merged.empty:
+        return raw_merged, raw_merged
+
+    # Normalized version for scoring
+    norm_df = raw_merged.copy()
+
     numeric_cols = [
         "Median Earnings of Students Working and Not Enrolled 10 Years After Entry",
         "Median Debt for Dependent Students",
@@ -116,11 +138,13 @@ def merge_and_normalize(ids):
         "Average Work Study Award",
         "Affordability Gap (net price minus income earned working 10 hrs at min wage)"
     ]
-    numeric_cols = [c for c in numeric_cols if c in merged.columns]
+    numeric_cols = [c for c in numeric_cols if c in norm_df.columns]
+
     scaler = MinMaxScaler()
     if numeric_cols:
-        merged[numeric_cols] = scaler.fit_transform(merged[numeric_cols].fillna(0))
-    return merged
+        norm_df[numeric_cols] = scaler.fit_transform(norm_df[numeric_cols].fillna(0))
+
+    return raw_merged, norm_df
 
 def score_and_rank_schools(merged_df, user_weights, column_directions):
     if merged_df.empty:
@@ -155,7 +179,7 @@ def init_session_state_defaults():
 init_session_state_defaults()
 
 #Input panel!
-st.title("🏫 College Finder")
+st.title("🏫 EquiCollege")
 
 with st.sidebar:
     st.markdown("### Profile & Preferences")
@@ -226,10 +250,11 @@ with st.sidebar:
             st.session_state._last_warning = "No colleges match your filters."
             return
 
-        merged = merge_and_normalize(found_ids)
-        if merged.empty:
+        raw_merged, norm_merged = merge_and_normalize(found_ids)
+
+        if norm_merged.empty:
             st.session_state.ranked_df = pd.DataFrame()
-            st.session_state.merged_df = merged
+            st.session_state.merged_df = norm_merged
             st.session_state._last_warning = "After merging datasets, no colleges had the required fields."
             return
 
@@ -242,12 +267,19 @@ with st.sidebar:
             "Out-of-State Average Tuition for First-Time, Full-Time Undergraduates",
             "Affordability Gap (net price minus income earned working 10 hrs at min wage)"
         }
-        for c in merged.columns:
+        for c in norm_merged.columns:
             column_directions[c] = "lower" if c in lower_is_better else "higher"
 
-        ranked = score_and_rank_schools(merged, user_weights, column_directions)
+        ranked = score_and_rank_schools(norm_merged, user_weights, column_directions)
+
+# Now join score back to raw version for display
+        ranked = ranked.merge(
+            raw_merged,
+            on="UNIQUE_IDENTIFICATION_NUMBER_OF_THE_INSTITUTION",
+            suffixes=("_norm", "")
+        )
         st.session_state.ranked_df = ranked
-        st.session_state.merged_df = merged
+        st.session_state.merged_df = norm_merged
         st.session_state._last_warning = None
 
     st.button("GO! Show Recommendations", type="primary", on_click=compute_recommendations_callback, key="go_button")
@@ -265,7 +297,7 @@ if ranked_df is None or ranked_df.empty:
     st.info("No recommendations yet — set filters on the left and click GO!")
 else:
     top_n = 9
-    top = ranked_df.head(top_n).copy()
+    top = ranked_df.drop_duplicates(subset="Institution Name", keep="first").head(top_n).copy()
     st.subheader(f"Top {min(top_n, len(top))} Recommendations")
     st.markdown("Click a college card's View details button to open its full detail view on the right.")
 
